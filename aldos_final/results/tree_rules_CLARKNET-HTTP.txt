@@ -1,0 +1,37 @@
+|--- min_transition_prob <= 0.02
+|   |--- weights: [0.00, 916.00] class: 1
+|--- min_transition_prob >  0.02
+|   |--- page_repetition <= 0.92
+|   |   |--- request_rate <= 4.66
+|   |   |   |--- rapid_requests <= 2.50
+|   |   |   |   |--- think_time_variance <= 0.32
+|   |   |   |   |   |--- weights: [1680.00, 16.00] class: 0
+|   |   |   |   |--- think_time_variance >  0.32
+|   |   |   |   |   |--- weights: [4351.00, 2.00] class: 0
+|   |   |   |--- rapid_requests >  2.50
+|   |   |   |   |--- session_duration <= 4.95
+|   |   |   |   |   |--- weights: [37.00, 0.00] class: 0
+|   |   |   |   |--- session_duration >  4.95
+|   |   |   |   |   |--- weights: [2.00, 3.00] class: 1
+|   |   |--- request_rate >  4.66
+|   |   |   |--- weights: [0.00, 16.00] class: 1
+|   |--- page_repetition >  0.92
+|   |   |--- request_rate <= 1.15
+|   |   |   |--- session_duration <= 9.07
+|   |   |   |   |--- session_duration <= 6.99
+|   |   |   |   |   |--- weights: [213.00, 5.00] class: 0
+|   |   |   |   |--- session_duration >  6.99
+|   |   |   |   |   |--- weights: [36.00, 18.00] class: 0
+|   |   |   |--- session_duration >  9.07
+|   |   |   |   |--- request_rate <= 0.39
+|   |   |   |   |   |--- weights: [39.00, 0.00] class: 0
+|   |   |   |   |--- request_rate >  0.39
+|   |   |   |   |   |--- weights: [1.00, 155.00] class: 1
+|   |   |--- request_rate >  1.15
+|   |   |   |--- pta_score <= 0.81
+|   |   |   |   |--- weights: [16.00, 0.00] class: 0
+|   |   |   |--- pta_score >  0.81
+|   |   |   |   |--- min_transition_prob <= 0.29
+|   |   |   |   |   |--- weights: [8.00, 0.00] class: 0
+|   |   |   |   |--- min_transition_prob >  0.29
+|   |   |   |   |   |--- weights: [17.00, 469.00] class: 1
