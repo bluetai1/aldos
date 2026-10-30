@@ -21,21 +21,24 @@ from pta.train_model import behaviour_features
 
 
 # ── Helper: the same behavioural features used by our ML stage ───────────────
-def extract_features(session):
-    return behaviour_features(session)
+def extract_features(session, page_cost=None):
+    return behaviour_features(session, page_cost)
 
 
-# ── Helper: pick the cut-off on a 1-D score that maximises training accuracy ──
+# ── Helper: pick the cut-off on a 1-D score that maximises training F1 ───────
+# (F1, not accuracy: with 80% legitimate traffic, "never flag" scores 80%)
 def best_threshold(scores, labels, attack_if_above=True):
-    scores = np.asarray(scores)
+    scores = np.asarray(scores, dtype=float)
     labels = np.asarray(labels)
-    best_t, best_acc = None, -1.0
-    for t in np.unique(scores):
-        preds = scores >= t if attack_if_above else scores <= t
-        acc   = float(np.mean(preds == labels))
-        if acc > best_acc:
-            best_t, best_acc = float(t), acc
-    return best_t
+    s = scores if attack_if_above else -scores        # flag when s >= cut-off
+    cuts = np.unique(s)
+    order = np.sort(s)
+    pos = np.sort(s[labels == 1])
+    flagged = len(s) - np.searchsorted(order, cuts, side="left")
+    tp      = len(pos) - np.searchsorted(pos, cuts, side="left")
+    f1      = 2 * tp / (flagged + len(pos) + 1e-12)
+    best    = cuts[int(np.argmax(f1))]
+    return float(best if attack_if_above else -best)
 
 
 # ── Model 1: PTA Only ─────────────────────────────────────────────────────────
@@ -94,7 +97,8 @@ class DeepLearningModel:
     """
     name = "Deep Learning / MLP (Neural Net)"
 
-    def __init__(self):
+    def __init__(self, page_cost=None):
+        self.page_cost = page_cost
         self.model = MLPClassifier(
             hidden_layer_sizes=(64, 32, 16),
             activation='relu',
@@ -107,7 +111,7 @@ class DeepLearningModel:
         self.trained = False
 
     def fit(self, pta_model, sessions, labels):
-        X = [extract_features(s) for s in sessions]
+        X = [extract_features(s, self.page_cost) for s in sessions]
         X = self.scaler.fit_transform(X)
         self.model.fit(X, labels)
         self.trained = True
@@ -115,12 +119,12 @@ class DeepLearningModel:
     def predict(self, sessions):
         if not self.trained:
             return [0] * len(sessions)
-        X = [extract_features(s) for s in sessions]
+        X = [extract_features(s, self.page_cost) for s in sessions]
         X = self.scaler.transform(X)
         return list(self.model.predict(X))
 
     def predict_proba(self, sessions):
-        X = [extract_features(s) for s in sessions]
+        X = [extract_features(s, self.page_cost) for s in sessions]
         X = self.scaler.transform(X)
         return self.model.predict_proba(X)[:, 1]
 
@@ -157,7 +161,7 @@ def evaluate_model(name, y_true, y_pred, elapsed_ms):
         "Precision":  round(precision_score(y_true, y_pred, zero_division=0) * 100, 1),
         "Recall":     round(recall_score(y_true, y_pred, zero_division=0) * 100, 1),
         "F1":         round(f1_score(y_true, y_pred, zero_division=0) * 100, 1),
-        "FPR %":      round(fpr * 100, 1),
+        "FPR %":      round(fpr * 100, 2),
         "FNR %":      round(fnr * 100, 1),
         "ms/sess":    round(elapsed_ms, 3),
     }
@@ -193,7 +197,7 @@ def run_comparison(detector, pta_model, train_sessions, train_labels,
     results.append(evaluate_model(m.name, test_labels, preds, elapsed))
 
     # 4. Deep Learning MLP
-    dl = DeepLearningModel()
+    dl = DeepLearningModel(page_cost=detector.ml.page_cost)
     print("    [Training Deep Learning model...]")
     dl.fit(pta_model, train_sessions, train_labels)
     t0 = time.perf_counter()

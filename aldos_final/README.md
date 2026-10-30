@@ -1,58 +1,74 @@
 # Hybrid PTA + Decision Tree for Application-Layer DDoS Detection
 
-A two-stage detector for **asymmetric application-layer DDoS attacks**: bots that take a web
-server down with a small number of valid-looking requests to its most expensive pages.
+A detector for **asymmetric application-layer DDoS attacks**: bots that take a web server down
+with a small number of valid-looking requests to its most expensive pages.
 
 - **Stage 1** is a **Probabilistic Timed Automaton (PTA)**, the model from Praseed & Thilagam
-  (IEEE TIFS, 2021). It quickly clears sessions that look clearly normal.
+  (IEEE TIFS, 2021). It scores how normal a session's page order and timing are.
 - **Stage 2** is a **Decision Tree** that gives each suspicious session an attack probability.
 - **Graded response:** that probability maps to **Allow / Challenge (CAPTCHA) / Block** instead
   of the original system's binary block-or-allow.
+- **Traffic layer:** server-side sessions, a per-client cost budget and a site-wide load guard
+  stop attackers from splitting an attack across many sessions or IPs.
 
 **Authors:** Tamirah Goode, Keila Chavez, Taiwo Ojo. CSIT 540 (Computer Networks Security),
 Montclair State University.
 **Paper:** *A Hybrid PTA and Decision Tree Framework for Application Layer DDoS Detection with
 Graded Response* ([`Final_Research_Paper.docx.pdf`](Final_Research_Paper.docx.pdf)).
 
-> **Note on results:** the paper reports 100% accuracy for the first version (v1) of this code.
-> After writing it, we found that the benchmark behind those numbers was flawed, fixed it, and
-> re-ran everything. This README reports the corrected (v2) results. See
-> [From the paper to v2](#from-the-paper-to-v2) for what changed and why.
+> **Note on results:** the paper reports 100% accuracy for the first version of this code. We
+> later found that benchmark was flawed, red-teamed the detector, and fixed what we found. This
+> README reports the current results. See [How the project evolved](#how-the-project-evolved).
 
 ---
 
 ## The problem
 
 A firewall inspects individual requests, but in this attack every request is valid. A bot that
-calls `/checkout` again and again sends nothing malformed. The only signal is **behaviour across
-the whole session**: which pages are visited in what order, how long the client waits between
-clicks, and how expensive those pages are to serve.
+calls `/checkout` again and again sends nothing malformed. The only signal is **behaviour**:
+- which pages are visited, and in what order;
+- how long the client waits between clicks;
+- how expensive those pages are to serve;
+- how much a client consumes over time.
 
-Praseed & Thilagam's PTA learns that behaviour from server logs and gives every session a
-suspicion score, but its decision is binary. A fast human who crosses the threshold gets blocked,
-and a careful bot that stays just under it gets through. This project adds a second, explainable
-stage and a middle "challenge" option.
+Praseed & Thilagam's PTA learns that behaviour from server logs, but its decision is binary. A
+fast human who crosses the threshold gets blocked, and a careful bot that stays just under it
+gets through. This project adds a second, explainable stage, a middle "challenge" option, and
+the traffic-level defences that a session-by-session model can't provide on its own.
 
 ---
 
 ## Architecture
 
 ```
-                 session = [(page, think_time), ...]
-                                  │
-                ┌─────────────────▼──────────────────┐
-  Stage 1       │  PTA suspicion score (every session)│
-                │  mean over transitions of           │
-                │  W · (1 − P_trans · P_think)        │
-                └─────────────────┬──────────────────┘
-                  score < θ       │       score ≥ θ
-             ┌────────────────────┴───────────────────┐
-             ▼                                        ▼
-          ALLOW                     ┌──────────────────────────────────┐
-     (no ML cost)        Stage 2    │ Decision Tree → attack probability│
-                                    └────────────────┬─────────────────┘
-                                 < 35%          35–70%           ≥ 70%
-                                 ALLOW        CHALLENGE          BLOCK
+  raw requests (client, time, page)
+            │
+  ┌─────────▼───────────────────────────────┐   pta/traffic.py
+  │ Server-side sessionization              │   (clients can't choose
+  │ per client, 5-min inactivity or logout  │    session boundaries)
+  └─────────┬───────────────────────────────┘
+            │ session = [(page, think_time), ...]
+            │
+            ├── < 3 requests ──► too short to judge alone:
+            │                    ALLOW, or CHALLENGE when the site-wide LoadGuard
+            │                    reports unusual load
+            ▼
+  ┌──────────────────────────────────────────┐
+  │ Stage 1: PTA suspicion score             │
+  │ mean over transitions of                 │
+  │ W · (1 − P_trans · P_think)              │
+  └─────────┬────────────────────────────────┘
+   score < θ│and ≥2 transitions scored     otherwise
+       ┌────┴───────────────────────────────────┐
+       ▼                                        ▼
+     ALLOW              ┌───────────────────────────────────┐
+                Stage 2 │ Decision Tree → attack probability │
+                        └───────────────┬───────────────────┘
+                          < 35%       35–70%       ≥ 70%
+                          ALLOW     CHALLENGE      BLOCK
+
+  ClientBudget: a client whose server cost over 10 minutes exceeds 2× the costliest
+  real visitor session is challenged, even if every session looks human.
 ```
 
 ### Stage 1: PTA
@@ -60,183 +76,193 @@ stage and a middle "challenge" option.
 The PTA is a directed graph learned from **legitimate** sessions. For each transition
 `page i → page j` it stores:
 
-- **`P_trans`**: the transition probability, `n_ij / Σ_k n_ik`.
-- **Think-time statistics**: mean `μ` and spread `σ`.
-- **Workload `W`**: the relative server cost.
+| Parameter | Meaning |
+|-----------|---------|
+| `P_trans` | Transition probability, `n_ij / Σ_k n_ik` |
+| `μ`, `σ`  | Think-time mean and spread |
+| `W`       | Workload: the destination page's server cost relative to an average request. `checkout` is 3.2, `index` 0.4 |
 
 Each step of a session is scored:
 
 ```
 P_think   = exp(−|t − μ| / σ)
-suspicion = W · (1 − P_trans · P_think)       # unknown transition → 1.0
+suspicion = W · (1 − P_trans · P_think)       # unseen transition → W
 ```
 
-The session's score is the mean over its transitions. The threshold **θ is learned**: it is set
-to the lowest score of any attack in the training data, so Stage 1 only fast-paths sessions that
-look more normal than every attack seen in training.
+Steps involving a page that never appeared in training are **skipped, not penalised**. A new
+page usually means the site changed, not that an attack is under way. A drift monitor
+(`PTAModel.unknown_page_share`) reports when this is happening, so you know to retrain.
 
-### Stage 2: Decision Tree (depth 5)
+θ is **learned**: it is set to the lowest score of any training attack, so Stage 1 never
+fast-paths a session that looks more normal than every attack seen in training.
 
-| Feature               | Captures                                            |
-|-----------------------|-----------------------------------------------------|
-| `request_rate`        | Requests per second over the session                |
-| `think_time_variance` | Bots are regular; humans vary                       |
-| `page_repetition`     | Share of requests hitting the most-requested page   |
-| `session_duration`    | Total time of the session                           |
-| `rapid_requests`      | Requests with < 0.5 s think time                    |
-| `longest_rapid_streak` | Longest run of consecutive < 0.5 s requests        |
-| `longest_same_page_streak` | Longest run of consecutive requests to one page |
-| `pta_score`           | Stage 1 score (page-order + timing evidence)        |
-| `min_transition_prob` | How unlikely the session's rarest step is           |
+### Stage 2: Decision Tree
 
-The two **streak** features were added after we found an evasion by testing our own model: an
-attacker who opens with a few normal-looking pages dilutes whole-session statistics like
-`page_repetition`. A decoy prefix can't shorten a streak, though. See
-[Red-teaming](#red-teaming).
+The tree's depth and minimum leaf size are chosen by **3-fold cross-validation on the training
+data** (depth 4–7; at least 10–40 training sessions per leaf, so no rule rests on one or two
+examples).
 
-We chose a Decision Tree over a neural network so that **every decision can be traced to
-readable if/then rules**, which can be audited, explained to a blocked user, or shown to a
-regulator.
+| Feature | Captures |
+|---------|----------|
+| `request_rate`, `session_duration` | How fast and how long |
+| `think_time_variance`, `think_time_cv`, `median_think_time` | Timing: bots are regular, humans vary |
+| `rapid_requests`, `longest_rapid_streak` | Requests under 0.5 s, and the longest run of them |
+| `page_repetition`, `longest_same_page_streak` | Hammering one page |
+| `cost_rate` | Server cost per second: the asymmetric-attack signal |
+| `pta_score`, `min_transition_prob` | Stage 1's view: unusual paths and timing |
+
+The **streak** features can't be diluted by opening with a few normal pages (see
+[Red-teaming](#red-teaming)). We chose a Decision Tree over a neural network so that **every
+decision can be traced to readable if/then rules** (`detector.explain()`).
 
 ### Graded response
 
-| Attack probability | Decision    | Action                              |
-|--------------------|-------------|-------------------------------------|
-| < 35%              | `ALLOW`     | Proceed                             |
-| 35–70%             | `CHALLENGE` | CAPTCHA or temporary rate limit     |
-| ≥ 70%              | `BLOCK`     | Terminate the session               |
+| Attack probability | Decision    | Action                          |
+|--------------------|-------------|---------------------------------|
+| < 35%              | `ALLOW`     | Proceed                         |
+| 35–70%             | `CHALLENGE` | CAPTCHA or temporary rate limit |
+| ≥ 70%              | `BLOCK`     | Terminate the session           |
 
 ---
 
-## Results (v2)
+## Results
 
-Each dataset has 10,000 sessions (80% legitimate, 20% attack), split 8,000 for training and
-2,000 for testing. Every model that needs training is trained on the same split. The table
-shows the **mean ± standard deviation over 5 random seeds**. Every number and figure is
-reproduced by `python report.py`.
+**Setup:** each dataset has 10,000 sessions (80% legitimate, 20% attack), split 8,000 for
+training and 2,000 for testing. Every model is trained on the same split and gets the same
+behavioural features. The PTA Only and Random Walk thresholds are tuned for F1 on the training
+data.
 
-| Model                        | SDSC Accuracy | SDSC F1   | SDSC FPR | SDSC FNR | ClarkNet Accuracy | ClarkNet F1 | ClarkNet FPR | ClarkNet FNR |
-|------------------------------|---------------|-----------|----------|----------|-------------------|-------------|--------------|--------------|
-| **Hybrid PTA + DT (ours)**   | **99.8 ± 0.1** | **99.5 ± 0.2** | **0.0 ± 0.0** | **0.9 ± 0.5** | **99.7 ± 0.1** | **99.1 ± 0.3** | 0.2 ± 0.1 | **1.1 ± 0.5** |
-| PTA Only (Praseed 2021)      | 92.1 ± 0.3    | 80.6 ± 1.3 | 5.8 ± 0.5 | 16.7 ± 3.5 | 82.3 ± 0.9     | 34.3 ± 1.9  | 2.5 ± 0.4    | 77.2 ± 1.6   |
-| Random Walk (Xu et al. 2014) | 97.4 ± 0.2    | 92.8 ± 0.6 | **0.0 ± 0.0** | 13.4 ± 1.1 | 92.2 ± 1.0 | 76.2 ± 2.9  | **0.0 ± 0.0** | 38.3 ± 3.8  |
-| Deep Learning (MLP 64-32-16) | 96.0 ± 0.1    | 89.4 ± 0.5 | 1.2 ± 0.1 | 15.2 ± 0.9 | 97.2 ± 0.4     | 92.9 ± 1.0  | 0.7 ± 0.2    | 10.9 ± 1.9   |
-| Rate Threshold (1.8 req/s)   | 86.4 ± 0.1    | 50.8 ± 0.9 | 1.1 ± 0.1 | 64.4 ± 1.0 | 85.5 ± 0.5     | 49.8 ± 2.2  | 1.6 ± 0.3    | 64.7 ± 2.2   |
+All values below are percentages: **mean ± standard deviation over 5 random seeds**. Reproduce
+them with `python report.py`.
 
-All values are percentages.
+| Model                        | SDSC Accuracy | SDSC F1 | SDSC FPR | SDSC FNR | ClarkNet Accuracy | ClarkNet F1 | ClarkNet FPR | ClarkNet FNR |
+|------------------------------|---------------|---------|----------|----------|-------------------|-------------|--------------|--------------|
+| **Hybrid PTA + DT (ours)**   | **99.2 ± 0.3** | **98.0 ± 0.7** | 0.37 ± 0.42 | **2.5 ± 1.6** | **99.2 ± 0.1** | **97.9 ± 0.3** | 0.62 ± 0.23 | **1.8 ± 1.0** |
+| PTA Only (Praseed 2021)      | 85.5 ± 1.1 | 60.6 ± 0.8 | 6.82 ± 2.24 | 44.9 ± 4.2 | 63.4 ± 0.5 | 47.0 ± 1.7 | 40.82 ± 1.43 | 20.5 ± 3.3 |
+| Random Walk (Xu et al. 2014) | 94.5 ± 0.3 | 84.3 ± 1.4 | **0.0 ± 0.0** | 27.0 ± 2.0 | 90.1 ± 0.4 | 67.9 ± 2.6 | **0.0 ± 0.0** | 48.5 ± 3.0 |
+| Deep Learning (MLP 64-32-16) | 97.2 ± 0.5 | 92.8 ± 1.5 | 1.03 ± 0.26 | 9.9 ± 2.1 | 97.9 ± 0.2 | 94.6 ± 0.8 | 0.53 ± 0.20 | 8.3 ± 1.6 |
+| Rate Threshold (1.8 req/s)   | 87.5 ± 0.4 | 58.1 ± 1.1 | 1.20 ± 0.34 | 57.1 ± 0.8 | 86.5 ± 0.7 | 55.1 ± 1.7 | 1.75 ± 0.33 | 59.4 ± 1.6 |
 
 **Takeaways:**
 
-- **The hybrid has the best accuracy, F1 and miss rate on both datasets.** It misses about 1% of
-  attacks; every other model misses 10–77%.
-- **Each signal alone misses an attack type, and the hybrid uses both.**
-  - Rate Threshold looks only at timing, so it misses about 64% of attacks: human-paced bots and
-    floods hidden behind a decoy.
-  - Random Walk looks only at page order, so it never raises a false alarm but misses bots whose
-    navigation looks normal.
-- **Only Random Walk has fewer false alarms.** On ClarkNet the hybrid's FPR is 0.2%, against
-  0.0% for Random Walk, and Random Walk misses 38% of attacks.
-- **The trained tree is readable** ([`results/tree_rules_*.txt`](results/)). Its first rule,
-  "the session contains a transition real users almost never make", catches 1,379 of 1,600
-  training attacks on SDSC.
-- **Stage 1 is safe but clears little.** The learned θ cleared 6.3% (SDSC) and 5.6% (ClarkNet)
-  of test sessions, with no attacks among them.
-- **Per-session cost, timed one session at a time:**
+- **The hybrid has the best accuracy, F1 and miss rate on both datasets.** It misses about 2% of
+  attacks; the other models miss 8–59%.
+- **Each signal alone misses an attack type.** Rate Threshold sees only timing, so it misses
+  human-paced bots. Random Walk sees only page order, so it never raises a false alarm but misses
+  bots on normal-looking paths. The PTA score alone barely separates ClarkNet traffic.
+- **False alarms are low, and rarely end in a block.** The hybrid flags 0.4–0.6% of real users.
+  On the seed-42 test sets, only 0.06% (SDSC) and 0.19% (ClarkNet) of real users were blocked
+  outright.
+- **The tree is readable** ([`results/tree_rules_*.txt`](results/)). Its first rule, "the session
+  contains a transition real users almost never make", catches 1,098 of 1,563 SDSC training
+  attacks.
+- **Per-session cost**, timed one session at a time:
 
   | Path                             | ms per session |
   |----------------------------------|----------------|
   | Stage 1 fast path                | ~0.01          |
-  | Full hybrid                      | ~0.12          |
-  | MLP, one session at a time       | ~0.22          |
-  | MLP, batched (not possible live) | 0.02–0.04      |
+  | Full hybrid                      | 0.16–0.18      |
+  | MLP, one session at a time       | ~0.29          |
+  | MLP, batched (not possible live) | 0.07–0.08      |
+
+**What the extra evaluations show** (seed 42, from `results/summary.json`):
+
+| | SDSC | ClarkNet |
+|---|---|---|
+| Detection by attack family (A1–A5) | 93.8–100% | 97.3–100% |
+| Path-following bots (A6) | 87.9% | 93.3% |
+| **Leave-one-family-out:** A6 when never seen in training | **34.5%** | **2.7%** |
+| Leave-one-family-out: other families | 82–100% | 95–100% |
+| Precision of BLOCK if 1% of sessions are attacks | 93.9% | 83.7% |
+| Precision of BLOCK if 0.1% of sessions are attacks | 60.3% | 33.8% |
+| Stage 1 fast path (share of test sessions) | 0.4% | 0.0% |
+
+- **The detector only catches path-following bots that it was trained on.** Without A6 examples,
+  it catches 2.7–34.5% of them.
+- **At realistic attack rates, many blocks hit real users.** That's why low-confidence flags
+  should be challenges rather than blocks.
+- **Stage 1 has almost no safe fast path left.** Bots on real paths score almost like real
+  users, so the lowest training-attack score (θ) is very low. Stage 1's value is now the evidence
+  it feeds Stage 2; at about 0.17 ms per session, running Stage 2 on everything is affordable.
 
 ---
 
 ## Red-teaming
 
-After the results above were first produced, we tried to evade our own detector. One normal
-page followed by six `product` requests 0.1 s apart was **allowed with 0% attack probability**:
+`python redteam.py` attacks the detector in eight ways. [`docs/red_team.md`](docs/red_team.md)
+records what each attack found before the fixes and the result after them. In summary:
 
-- Every flood in the training data hit a single page from start to finish, so the tree had
-  learned "almost all requests on one page" as the flood signal.
-- One decoy page dropped that share below the tree's cut-off.
-
-**The fix:**
-
-- 30% of benchmark attacks now open with 1–3 normal-looking pages.
-- We added the two streak features, which a decoy prefix can't dilute.
-- The MLP baseline gets the same features, so the comparison stays fair.
-
-After retraining, the detector blocks all of the following:
-
-- decoy + flood (with 1 or 3 decoy pages)
-- flood + decoy suffix
-- floods that alternate between two pages
-- 0.6 s-paced floods, just above the "rapid" cut-off
-- human-paced single-page bots
-
-It still allows a 3-request session with two fast clicks: too short to call, and it looks just
-like a user double-clicking.
+| Attack | Before fixes | After fixes |
+|---|---|---|
+| Split into 2-request sessions from one IP | 100% allowed | **0% allowed** (server-side sessionization) |
+| 3,000-IP botnet, one checkout request each | allowed | **1% allowed** (LoadGuard); 1.3% of real requests challenged, 0.2% blocked |
+| Site adds a new page | 26.8% of real users flagged | **0.2%**, and the drift monitor reports 5.3% unknown pages |
+| Decoy page, then flood | allowed | **blocked** (streak features) |
+| Real-path bot, 0.3–0.5 s | 62.6% caught | **98.0%** |
+| Real-path bot, 0.5–1.0 s | 0.8% caught | **51.8%** per session; the client budget catches it if it continues |
+| Human-paced bot running continuously | never caught | **challenged after 21 requests** (client budget) |
+| Best allowed single session (attacker search) | 2.8× a heavy user's checkout rate | 3.0×; sessionization stops repeating it |
+| Workload | W = 1 everywhere | Learned per page (checkout 3.2 … logout 0.2) |
+| 50% of training attacks mislabelled | 5.8% missed | 18.5% missed |
 
 ---
 
-## From the paper to v2
+## How the project evolved
 
-| | Paper (v1) | This code (v2) |
+| | Paper (v1) | Now |
 |---|---|---|
-| PTA used on SDSC/ClarkNet | Hand-written `login/dashboard/...` graph; the benchmark sites' pages were unknown to it | Learned per dataset from legitimate training sessions |
-| Stage 1 threshold θ | Fixed at 0.60 | Learned from the training data (the paper's future work, §VI) |
-| Baseline thresholds | Fixed (0.55, 0.35) | Tuned on the training split, same PTA as ours |
-| Attack timing | Every attack 0.05–0.20 s apart | 40% flood, 30% slow bot, 30% human-paced; 30% open with a decoy |
-| Legitimate navigation | Random pages | Realistic flows (e.g. search → product → cart → checkout), plus 20% fast "power users" |
-| Stage 2 features | 5 behavioural | 7 behavioural (incl. 2 streak features) + 2 PTA features |
-| Demo detector | Trained on a small toy set | The same detector as the SDSC benchmark |
-| Headline result | 100% accuracy, 0% FPR | 99.8% / 99.7% accuracy, 0.0% / 0.2% FPR (5-seed mean) |
-| Figures, Stage 1 coverage, latency | Not generated by the code | Measured by `report.py` |
+| PTA on SDSC/ClarkNet | Hand-written graph, so the benchmark sites' pages were unknown | Learned per dataset, with page workload |
+| Stage 1 threshold θ | Fixed at 0.60 | Learned from training attacks |
+| Baselines | Fixed thresholds | Tuned for F1 on the same training split |
+| Attacks | All 0.05–0.20 s floods | Floods, slow and human-paced bots, decoy prefixes, path-following bots (A6) |
+| Legitimate users | Random pages | Navigation flows, plus 20% fast power users |
+| Stage 2 | 5 features, fixed tree | 12 features, tree size chosen by cross-validation |
+| Scope | One session at a time | Plus sessionization, client budget and load guard |
+| Headline | 100% accuracy, 0% FPR | 99.2% / 99.2% accuracy, 0.4% / 0.6% FPR (5-seed mean) |
+| Evidence | Figures not generated by the code | `report.py` and `redteam.py` regenerate every number |
 
-**Why we changed it:**
+**Why the numbers changed:**
+- **Timing alone separated the classes in v1.** Even a one-line rate threshold scored 100%.
+- **The v1 baselines weren't a fair comparison.** They ran on a graph that didn't contain the
+  benchmark sites' pages.
+- **Red-teaming found real gaps:** session splitting, site changes and mimicry bots. Closing them
+  meant adding harder attacks to the data, which lowers the headline accuracy but makes it mean
+  something.
 
-- **Timing alone separated the classes in v1.** Even a one-line rate threshold scored 100%, so
-  the benchmark couldn't tell good detectors from bad ones.
-- **The v1 baselines weren't a fair comparison.** PTA Only and Random Walk scored 19% because
-  they were run against a graph that didn't contain the benchmark sites' pages. That was our
-  setup error, not a weakness of those methods.
-- **Stage 1 never fast-pathed anything in v1.** Even normal users scored above 0.60 (Table 1 of
-  the paper shows 0.948 for a normal user), so every session went to the tree.
-
-The v2 numbers are lower but meaningful: the hybrid now wins because it combines two kinds of
-evidence, not because the data was easy.
-
-[`docs/paper_revisions.md`](docs/paper_revisions.md) lists every paper section affected by these
-changes, with replacement text based on the measured results.
+[`docs/paper_revisions.md`](docs/paper_revisions.md) lists every paper section affected, with
+replacement text.
 
 ---
 
 ## Datasets
 
 The original SDSC-HTTP and ClarkNet-HTTP logs aren't readily available, so
-[`pta/datasets.py`](pta/datasets.py) reconstructs sessions in their style.
+[`pta/datasets.py`](pta/datasets.py) reconstructs sessions in their style:
 
-- **SDSC-HTTP:** e-commerce-like pages (`index`, `login`, `search`, `product`, `cart`,
-  `checkout`, `profile`, `logout`).
+- **SDSC-HTTP:** e-commerce pages (`index`, `login`, `search`, `product`, `cart`, `checkout`,
+  `profile`, `logout`).
 - **ClarkNet-HTTP:** news-portal pages (`home`, `news`, `sports`, `tech`, `login`, `search`,
   `archive`, `logout`).
 
 **Legitimate users** follow a Markov navigation flow. Their think times are log-normal (mean
 ≈ 2 s), and 20% are fast power users (median ≈ 1 s).
 
-**Attacks** use the paper's five types:
+**Attacks** come in six types, in equal shares:
 
-| Type | Attack                                             |
-|------|----------------------------------------------------|
-| A1   | Random flood                                       |
-| A2   | Single-URL flood                                   |
-| A3   | Random asymmetric (high-workload pages)            |
-| A4   | Single-URL asymmetric (`checkout`)                 |
-| A5   | Botnet (repeated scripted sequence)                |
+| Type | Attack |
+|------|--------|
+| A1   | Random flood |
+| A2   | Single-URL flood |
+| A3   | Random asymmetric (high-workload pages) |
+| A4   | Single-URL asymmetric (`checkout`) |
+| A5   | Botnet (repeated scripted sequence) |
+| A6   | **Path-following bot:** follows real navigation with regular 0.05–1.0 s pacing |
 
-Each attack session gets one pacing: flood, slow bot, or human-paced but regular. 30% of attack
-sessions open with 1–3 normal-looking pages (a decoy).
+A1–A5 sessions are paced as a flood (40%), a slow bot (30%) or a human-paced but regular bot
+(30%). 30% of them open with 1–3 normal-looking pages (a decoy).
+
+**Page costs** (`SDSC_COST`, `CLARK_COST`) are assumed relative server costs. In deployment,
+they would be learned from response-time logs.
 
 ---
 
@@ -244,21 +270,24 @@ sessions open with 1–3 normal-looking pages (a decoy).
 
 ```
 aldos_final/
-├── main.py                  # Demo (8 sample sessions + batch) and full benchmark
+├── main.py                  # Demo: 8 sessions, 10 held-out sessions, five-model comparison
 ├── demo.py                  # Interactive: test your own sessions (python -i demo.py)
-├── report.py                # Measures every paper number/figure → results/
+├── report.py                # Every result, figure and evaluation → results/
+├── redteam.py               # Adversarial experiments E1–E8
+├── hybrid_detector.py       # HybridDetector: fit / evaluate_session / explain
 ├── Final_Research_Paper.docx.pdf  # The paper (v1 results; see docs/paper_revisions.md)
-├── hybrid_detector.py       # HybridDetector: fit / train / evaluate_session / explain
 ├── requirements.txt         # numpy, scikit-learn, networkx, matplotlib
-├── results/                 # summary.json, fig1–fig5 PNGs, tree_rules_*.txt
+├── results/                 # summary.json, fig1–fig5, tree_rules_*.txt
 ├── docs/
-│   └── paper_revisions.md   # Section-by-section corrections to the paper
+│   ├── paper_revisions.md   # Section-by-section corrections to the paper
+│   └── red_team.md          # Red-team findings, fixes and remaining risks
 └── pta/
-    ├── pta_model.py         # PTAModel: networkx DiGraph; learn() builds it from sessions
-    ├── scoring.py           # P_think, per-transition suspicion, session score, min transition prob
-    ├── train_model.py       # MLModel: feature extraction + DecisionTreeClassifier
-    ├── datasets.py          # SDSC / ClarkNet style dataset generators (benchmark)
-    ├── simulate_data.py     # Small toy set used by detector.train() (not the demo)
+    ├── pta_model.py         # PTAModel: learned graph, page workload, drift monitor
+    ├── scoring.py           # P_think, suspicion, session score, min transition prob
+    ├── train_model.py       # Behavioural features + CV-tuned DecisionTreeClassifier
+    ├── traffic.py           # sessionize(), ClientBudget, LoadGuard
+    ├── datasets.py          # SDSC / ClarkNet style generators, page costs
+    ├── simulate_data.py     # Small toy set used by detector.train()
     └── models_comparison.py # Baselines, threshold tuning, metrics, comparison table
 ```
 
@@ -271,65 +300,63 @@ Requires Python 3.8+.
 ```bash
 cd aldos_final
 pip install -r requirements.txt
-python main.py          # on Windows, use "py main.py" if python isn't on PATH
+python main.py          # ~10 s. On Windows, use "py main.py" if python isn't on PATH
 python -i demo.py       # interactive: check([("checkout", 0.1)] * 6)
-python report.py        # regenerate results/ (a few minutes, including the 5-seed sweep)
+python redteam.py       # ~1 min
+python report.py        # a few minutes: seeds, leave-one-family-out, figures
 ```
-
-`main.py` takes about 10 seconds and prints:
-
-1. **Eight sample sessions** scored by the SDSC-trained detector. Each shows its PTA score, the
-   stage that decided, the decision, and the attack probability. The sessions include a fast
-   legitimate user, a slow bot and a disguised flood.
-2. **Ten held-out test sessions**, with their true labels: 6 random, plus examples of the
-   Stage 1 fast path and of `CHALLENGE`.
-3. **A five-model comparison** on each dataset.
-4. **A summary table.**
 
 ### Using the detector
 
 ```python
 from hybrid_detector import HybridDetector
+from pta.datasets import SDSC_COST
 
 detector = HybridDetector()
-detector.fit(train_sessions, train_labels)      # labels: 0 = legitimate, 1 = attack
+detector.fit(train_sessions, train_labels, page_cost=SDSC_COST)   # 0 = legit, 1 = attack
 
-detector.evaluate_session([("login", 0.08), ("login", 0.09), ("search", 0.07)])
-# {'pta_score': ..., 'stage': 'ML', 'decision': 'BLOCK', 'risk': 'HIGH', 'attack_prob': ...}
+detector.evaluate_session([("checkout", 0.1)] * 6)
+# {'pta_score': 3.18, 'stage': 'ML', 'decision': 'BLOCK', 'risk': 'HIGH', 'attack_prob': 1.0}
+print(detector.explain())                                         # the tree as rules
 ```
 
-`print(detector.explain())` prints the trained tree as if/then rules.
-`detector.train(n_samples)` fits on a small toy set from `simulate_data.py`. It's quick, but
-too small to give a stable tree, so the demos use the SDSC-trained detector instead.
+For a live request stream, see `pta/traffic.py`:
+- `sessionize()` turns raw `(client, time, page)` requests into sessions.
+- `ClientBudget` and `LoadGuard` track per-client and site-wide cost.
+- Pass `under_load=guard.under_load()` to `evaluate_session`.
+
+`redteam.py` (E3) shows all three working together.
 
 ---
 
 ## Limitations
 
-- **The data is synthetic.** The results depend on the flows and timing distributions in
-  `datasets.py`. Validating on real logs (SDSC, ClarkNet, CAIDA) is the most important next step.
-- **Sessions are evaluated in isolation.** A distributed attacker can keep every session
-  harmless-looking. Tracking behaviour per IP across sessions would close this gap.
-- **`CHALLENGE` is rare:** 1 (SDSC) and 4 (ClarkNet) of 2,000 test sessions. Most tree leaves
-  contain only one class, so probabilities are almost always 0% or 100%. These datasets contain
-  few genuinely ambiguous sessions. Real traffic and calibrated probabilities are needed to
-  evaluate the graded response properly.
-- **Red-teaming covered only the evasions we thought of.** A supervised model catches the attacks
-  it was trained on; a new evasion strategy may need new training data or features.
-- **The learned θ can admit disguised bots.** An attack that scores lower than every training
-  attack is allowed at Stage 1. On the benchmark test sets this never happened.
-- **Single-request sessions score 0 and are always cleared,** because there's no transition to
-  score.
-- **The timings are rough.** They come from single-threaded Python on one laptop and vary by
-  about 10% between runs.
+- **The data is synthetic.** Every result depends on the generators in `datasets.py`, including
+  the assumed page costs. Validating on real logs is the most important next step.
+- **Unseen attack families generalise poorly.** Path-following bots are caught only when
+  training includes them (2.7–34.5% when it doesn't).
+- **Human-paced bots can't be caught within a single session.** They are caught only by the
+  client budget, after about a minute. A large enough botnet of them looks like a flash crowd:
+  the load guard challenges short sessions, but not long human-looking ones.
+- **`CHALLENGE` is rare** (0 and 12 of 2,000 test sessions). Most tree leaves are nearly pure,
+  so the graded response is rarely exercised. Probability calibration is future work.
+- **Precision collapses at realistic prevalence.** If 0.1% of sessions are attacks, only 34–60%
+  of blocks hit attackers. The 0.06–0.19% innocent-block rate rests on only 1–3 real users in
+  each test set, so it's an estimate with wide error bars.
+- **The traffic-layer defences have their own costs.** The client budget and load guard are
+  calibrated at 2× normal peaks. A heavy real user with several sessions in 10 minutes can
+  exceed the budget and be challenged.
+- **Poisoning weakens the detector at scale.** With 50% of training attacks mislabelled, it
+  misses 18.5% of attacks. Build the PTA from verified-clean traffic.
+- **The timings are rough.** They come from single-threaded Python on one laptop.
 
 ## Future work
 
-- Evaluate on real logs.
-- Track behaviour across sessions per IP.
-- Calibrate probabilities so `CHALLENGE` is used more.
+- Evaluate on real logs, with response times for page costs.
+- Calibrate probabilities so `CHALLENGE` reflects genuine uncertainty.
+- Generate adversarial attacks automatically, and retrain on what gets through.
 - Push `BLOCK` decisions to an SDN controller.
-- Model HTTP/2 multiplexed sessions (see Praseed & Thilagam, TIFS 2020).
+- Model HTTP/2 multiplexed sessions (Praseed & Thilagam, TIFS 2020).
 
 ## References
 

@@ -18,7 +18,7 @@ Each step is (page, seconds since the previous request).
 
 import sys
 from hybrid_detector import HybridDetector
-from pta.datasets import build_sdsc_dataset, SDSC_PAGES
+from pta.datasets import build_sdsc_dataset, SDSC_PAGES, SDSC_COST
 
 # θ and → below crash on consoles that aren't UTF-8 (e.g. Windows cp1252)
 sys.stdout.reconfigure(encoding="utf-8")
@@ -26,7 +26,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 print("Fitting detector on 8,000 SDSC-HTTP style sessions...")
 sessions, labels = build_sdsc_dataset(n_sessions=10000)
 detector = HybridDetector()
-detector.fit(sessions[:8000], labels[:8000])
+detector.fit(sessions[:8000], labels[:8000], page_cost=SDSC_COST)
 print(f"Ready. Learned Stage 1 threshold θ = {detector.pta_threshold:.3f}")
 print(f"Pages: {', '.join(SDSC_PAGES)}\n")
 
@@ -37,7 +37,10 @@ def check(session):
     print(f"  Session    : {' → '.join(p for p, _ in session)}")
     print(f"  Think times: {[t for _, t in session]}")
     print(f"  PTA score  : {r['pta_score']}  (θ = {detector.pta_threshold:.3f})")
-    if r["stage"] == "PTA":
+    if r["stage"] == "SHORT":
+        print("  Too short  : fewer than 3 requests; judged by the client budget"
+              " and site load guard (pta/traffic.py)")
+    elif r["stage"] == "PTA":
         print("  Stage 1    : below θ, cleared without the classifier")
     else:
         print(f"  Stage 2    : attack probability {r['attack_prob'] * 100:.1f}%")

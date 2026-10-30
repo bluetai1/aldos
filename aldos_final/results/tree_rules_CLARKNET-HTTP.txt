@@ -1,40 +1,52 @@
-|--- min_transition_prob <= 0.03
-|   |--- weights: [0.00, 948.00] class: 1
-|--- min_transition_prob >  0.03
+|--- min_transition_prob <= 0.02
+|   |--- weights: [0.00, 799.00] class: 1
+|--- min_transition_prob >  0.02
 |   |--- longest_same_page_streak <= 4.50
-|   |   |--- rapid_requests <= 3.50
-|   |   |   |--- rapid_requests <= 2.50
-|   |   |   |   |--- request_rate <= 0.50
-|   |   |   |   |   |--- weights: [3552.00, 1.00] class: 0
-|   |   |   |   |--- request_rate >  0.50
-|   |   |   |   |   |--- weights: [2824.00, 18.00] class: 0
-|   |   |   |--- rapid_requests >  2.50
-|   |   |   |   |--- session_duration <= 5.95
-|   |   |   |   |   |--- weights: [29.00, 0.00] class: 0
-|   |   |   |   |--- session_duration >  5.95
-|   |   |   |   |   |--- weights: [0.00, 2.00] class: 1
-|   |   |--- rapid_requests >  3.50
-|   |   |   |--- longest_rapid_streak <= 2.50
-|   |   |   |   |--- session_duration <= 5.34
-|   |   |   |   |   |--- weights: [3.00, 0.00] class: 0
-|   |   |   |   |--- session_duration >  5.34
-|   |   |   |   |   |--- weights: [0.00, 1.00] class: 1
-|   |   |   |--- longest_rapid_streak >  2.50
-|   |   |   |   |--- min_transition_prob <= 0.27
-|   |   |   |   |   |--- weights: [0.00, 14.00] class: 1
-|   |   |   |   |--- min_transition_prob >  0.27
-|   |   |   |   |   |--- weights: [1.00, 1.00] class: 0
+|   |   |--- longest_rapid_streak <= 3.50
+|   |   |   |--- request_rate <= 1.22
+|   |   |   |   |--- request_rate <= 1.15
+|   |   |   |   |   |--- page_repetition <= 0.23
+|   |   |   |   |   |   |--- median_think_time <= 1.73
+|   |   |   |   |   |   |   |--- weights: [19.00, 1.00] class: 0
+|   |   |   |   |   |   |--- median_think_time >  1.73
+|   |   |   |   |   |   |   |--- weights: [37.00, 0.00] class: 0
+|   |   |   |   |   |--- page_repetition >  0.23
+|   |   |   |   |   |   |--- think_time_variance <= 0.32
+|   |   |   |   |   |   |   |--- weights: [1318.00, 5.00] class: 0
+|   |   |   |   |   |   |--- think_time_variance >  0.32
+|   |   |   |   |   |   |   |--- weights: [4409.00, 1.00] class: 0
+|   |   |   |   |--- request_rate >  1.15
+|   |   |   |   |   |--- session_duration <= 4.29
+|   |   |   |   |   |   |--- weights: [94.00, 0.00] class: 0
+|   |   |   |   |   |--- session_duration >  4.29
+|   |   |   |   |   |   |--- weights: [24.00, 7.00] class: 0
+|   |   |   |--- request_rate >  1.22
+|   |   |   |   |--- session_duration <= 4.98
+|   |   |   |   |   |--- rapid_requests <= 0.50
+|   |   |   |   |   |   |--- session_duration <= 3.26
+|   |   |   |   |   |   |   |--- weights: [122.00, 8.00] class: 0
+|   |   |   |   |   |   |--- session_duration >  3.26
+|   |   |   |   |   |   |   |--- weights: [10.00, 16.00] class: 1
+|   |   |   |   |   |--- rapid_requests >  0.50
+|   |   |   |   |   |   |--- rapid_requests <= 2.50
+|   |   |   |   |   |   |   |--- weights: [355.00, 1.00] class: 0
+|   |   |   |   |   |   |--- rapid_requests >  2.50
+|   |   |   |   |   |   |   |--- weights: [36.00, 3.00] class: 0
+|   |   |   |   |--- session_duration >  4.98
+|   |   |   |   |   |--- weights: [0.00, 64.00] class: 1
+|   |   |--- longest_rapid_streak >  3.50
+|   |   |   |--- rapid_requests <= 4.50
+|   |   |   |   |--- weights: [1.00, 19.00] class: 1
+|   |   |   |--- rapid_requests >  4.50
+|   |   |   |   |--- weights: [0.00, 150.00] class: 1
 |   |--- longest_same_page_streak >  4.50
-|   |   |--- request_rate <= 0.40
-|   |   |   |--- min_transition_prob <= 0.19
-|   |   |   |   |--- weights: [0.00, 2.00] class: 1
-|   |   |   |--- min_transition_prob >  0.19
-|   |   |   |   |--- weights: [10.00, 0.00] class: 0
-|   |   |--- request_rate >  0.40
+|   |   |--- request_rate <= 0.47
+|   |   |   |--- weights: [11.00, 13.00] class: 1
+|   |   |--- request_rate >  0.47
 |   |   |   |--- longest_same_page_streak <= 5.50
-|   |   |   |   |--- session_duration <= 10.31
-|   |   |   |   |   |--- weights: [5.00, 86.00] class: 1
-|   |   |   |   |--- session_duration >  10.31
-|   |   |   |   |   |--- weights: [5.00, 8.00] class: 1
+|   |   |   |   |--- think_time_variance <= 0.14
+|   |   |   |   |   |--- weights: [0.00, 60.00] class: 1
+|   |   |   |   |--- think_time_variance >  0.14
+|   |   |   |   |   |--- weights: [6.00, 20.00] class: 1
 |   |   |   |--- longest_same_page_streak >  5.50
-|   |   |   |   |--- weights: [0.00, 490.00] class: 1
+|   |   |   |   |--- weights: [0.00, 391.00] class: 1

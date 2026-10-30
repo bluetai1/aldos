@@ -1,5 +1,6 @@
 from hybrid_detector import HybridDetector
-from pta.datasets import build_sdsc_dataset, build_clarknet_dataset
+from pta.datasets import (build_sdsc_dataset, build_clarknet_dataset,
+                          SDSC_COST, CLARK_COST)
 from pta.models_comparison import run_comparison, print_comparison_table
 import random
 import sys
@@ -9,7 +10,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 def print_result(label, session, result):
     attack     = result['attack_prob']
-    attack_str = f"{attack * 100:.1f}%" if attack is not None else "N/A (cleared at Stage 1)"
+    attack_str = (f"{attack * 100:.1f}%" if attack is not None else
+                  "N/A (too short to judge alone)" if result['stage'] == "SHORT" else
+                  "N/A (cleared at Stage 1)")
     print(f"\n{'─'*60}")
     print(f"  [{label}]")
     print(f"  Session     : {session}")
@@ -33,7 +36,7 @@ def main():
     test_s  = sdsc_sessions[TRAIN_SPLIT:]; test_l  = sdsc_labels[TRAIN_SPLIT:]
 
     detector_sdsc = HybridDetector()
-    detector_sdsc.fit(train_s, train_l)
+    detector_sdsc.fit(train_s, train_l, page_cost=SDSC_COST)
     print(f"\n[TRAIN] Fitted on {TRAIN_SPLIT:,} SDSC-HTTP sessions "
           f"({train_l.count(0):,} legitimate, {train_l.count(1):,} attack). "
           f"Learned θ = {detector_sdsc.pta_threshold:.3f}")
@@ -63,7 +66,8 @@ def main():
         print_result(label, session, result)
 
     # ── Batch: held-out test sessions ──────────────────────────
-    # 6 at random, plus examples of the Stage 1 fast path and of CHALLENGE
+    # Random sessions, plus up to 2 examples each of the Stage 1 fast path
+    # and of CHALLENGE when the test set has any
     outputs   = detector_sdsc.evaluate_batch(test_s)
     rng       = random.Random(7)
     cleared   = [i for i, o in enumerate(outputs) if o["stage"] == "PTA"][:2]
@@ -74,7 +78,8 @@ def main():
 
     print(f"\n\n{'='*60}")
     print("  Batch: 10 held-out test sessions")
-    print("  (6 random + Stage 1 and CHALLENGE examples)")
+    print(f"  ({10 - len(cleared) - len(challenge)} random, {len(cleared)} Stage 1 "
+          f"fast-path, {len(challenge)} CHALLENGE examples)")
     print("=" * 60)
     print(f"\n  {'#':<4} {'Truth':<8} {'PTA Score':<11} {'Stage':<6} {'Decision':<11} {'Attack Prob'}")
     print(f"  {'─'*55}")
@@ -113,7 +118,7 @@ def main():
     test_s  = clark_sessions[TRAIN_SPLIT:]; test_l  = clark_labels[TRAIN_SPLIT:]
 
     detector_clark = HybridDetector()
-    detector_clark.fit(train_s, train_l)
+    detector_clark.fit(train_s, train_l, page_cost=CLARK_COST)
 
     print("  Running all models...\n")
     clark_results = run_comparison(detector_clark, detector_clark.pta,

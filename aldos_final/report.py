@@ -23,14 +23,50 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 
 from hybrid_detector import HybridDetector
-from pta.datasets import build_sdsc_dataset, build_clarknet_dataset
+from pta.datasets import (build_sdsc_dataset, build_clarknet_dataset,
+                          SDSC_COST, CLARK_COST, ATTACK_TYPES)
 from pta.models_comparison import run_comparison, DeepLearningModel
 
 OUT         = "results"
 N           = 10000
 TRAIN_SPLIT = 8000
-DATASETS    = [("SDSC-HTTP", build_sdsc_dataset),
-               ("CLARKNET-HTTP", build_clarknet_dataset)]
+DATASETS    = [("SDSC-HTTP", build_sdsc_dataset, SDSC_COST),
+               ("CLARKNET-HTTP", build_clarknet_dataset, CLARK_COST)]
+PREVALENCES = [0.20, 0.01, 0.001]
+
+
+def _precision_at(tpr, fpr, prevalence):
+    return tpr * prevalence / (tpr * prevalence + fpr * (1 - prevalence) + 1e-12)
+
+
+def base_rate(outputs, labels):
+    """Precision when attacks are rare. An observed FPR of 0 is floored at
+    1/(number of legitimate test sessions): zero seen is not zero."""
+    n_legit = labels.count(0)
+    floor   = 1 / n_legit
+    flagged = [o["decision"] != "ALLOW" for o in outputs]
+    blocked = [o["decision"] == "BLOCK" for o in outputs]
+    tpr     = np.mean([f for f, y in zip(flagged, labels) if y == 1])
+    out = {}
+    for kind, preds in (("flagged", flagged), ("blocked", blocked)):
+        fpr = max(np.mean([p for p, y in zip(preds, labels) if y == 0]), floor)
+        out[kind] = {f"{p:g}": round(100 * _precision_at(tpr, fpr, p), 1)
+                     for p in PREVALENCES}
+    return out
+
+
+def leave_one_family_out(builder, cost):
+    """Detection rate on each attack family when the detector never saw it."""
+    sessions, labels, types = builder(n_sessions=N, return_types=True)
+    out = {}
+    for fam in ATTACK_TYPES:
+        keep = [i for i in range(TRAIN_SPLIT) if types[i] != fam]
+        d = HybridDetector()
+        d.fit([sessions[i] for i in keep], [labels[i] for i in keep], page_cost=cost)
+        test = [s for s, t in zip(sessions[TRAIN_SPLIT:], types[TRAIN_SPLIT:]) if t == fam]
+        out[fam] = round(100 * np.mean([d.evaluate_session(s)["decision"] != "ALLOW"
+                                        for s in test]), 1)
+    return out
 SHORT_NAMES = {"Hybrid PTA+DT (Ours)":             "Hybrid\n(ours)",
                "PTA Only (Praseed 2021)":          "PTA Only",
                "Random Walk (Xu et al. 2014)":     "Random\nWalk",
@@ -46,13 +82,14 @@ def _ms_per_session(fn, sessions):
     return (time.perf_counter() - t0) * 1000 / len(sessions)
 
 
-def measure(name, builder):
-    sessions, labels = builder(n_sessions=N)
+def measure(name, builder, cost):
+    sessions, labels, types = builder(n_sessions=N, return_types=True)
     train_s, train_l = sessions[:TRAIN_SPLIT], labels[:TRAIN_SPLIT]
     test_s,  test_l  = sessions[TRAIN_SPLIT:], labels[TRAIN_SPLIT:]
+    test_t           = types[TRAIN_SPLIT:]
 
     detector = HybridDetector()
-    detector.fit(train_s, train_l)
+    detector.fit(train_s, train_l, page_cost=cost)
     models = run_comparison(detector, detector.pta,
                             train_s, train_l, test_s, test_l)
 
@@ -65,7 +102,7 @@ def measure(name, builder):
 
     # ── Latency, every model timed one session at a time ─────────────────────
     escalated = [s for s, c in zip(test_s, cleared) if not c]
-    mlp = DeepLearningModel()
+    mlp = DeepLearningModel(page_cost=cost)
     mlp.fit(None, train_s, train_l)
     latency = {
         "stage1_only_ms":    _ms_per_session(detector._stage1_pta_score, test_s),
@@ -97,8 +134,15 @@ def measure(name, builder):
                                 if c and y == 0) / test_l.count(0), 1),
             "decisions": {d: decisions.count(d)
                           for d in ("ALLOW", "CHALLENGE", "BLOCK")},
+            "legit_blocked_pct": round(100 * sum(1 for d, y in zip(decisions, test_l)
+                                                 if d == "BLOCK" and y == 0)
+                                       / test_l.count(0), 2),
             "tree_depth":  int(detector.ml.model.get_depth()),
             "tree_leaves": int(detector.ml.model.get_n_leaves()),
+            "detection_by_family": {
+                fam: round(100 * np.mean([p for p, t in zip(preds, test_t) if t == fam]), 1)
+                for fam in ATTACK_TYPES},
+            "precision_at_prevalence": base_rate(outputs, test_l),
         },
         "latency_ms": {k: (round(v, 4) if v is not None else None)
                        for k, v in latency.items()},
@@ -111,7 +155,7 @@ def measure(name, builder):
 def _grouped_bars(ax, results, metric, ylabel):
     names = [m["Model"] for m in results[DATASETS[0][0]]["models"]]
     x, w  = np.arange(len(names)), 0.38
-    for i, (ds, _) in enumerate(DATASETS):
+    for i, (ds, *_) in enumerate(DATASETS):
         vals = [m[metric] for m in results[ds]["models"]]
         bars = ax.bar(x + (i - 0.5) * w, vals, w, label=ds)
         ax.bar_label(bars, fmt="%.1f", fontsize=7, padding=1)
@@ -136,7 +180,7 @@ def figures(results):
     fig.tight_layout(); fig.savefig(os.path.join(OUT, "fig2_error_rates.png"), dpi=200)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
-    for ax, (ds, _) in zip(axes, DATASETS):
+    for ax, (ds, *_) in zip(axes, DATASETS):
         sc   = results[ds]["_scores"]
         bins = np.linspace(0, max(max(sc["legit"]), max(sc["attack"])), 60)
         ax.hist(sc["legit"],  bins=bins, alpha=0.7, density=True, label="Legitimate")
@@ -152,7 +196,7 @@ def figures(results):
     keys   = ["stage1_only_ms", "hybrid_full_ms", "mlp_single_ms", "mlp_batched_ms"]
     fig, ax = plt.subplots(figsize=(8, 4.2))
     x, w = np.arange(len(keys)), 0.38
-    for i, (ds, _) in enumerate(DATASETS):
+    for i, (ds, *_) in enumerate(DATASETS):
         vals = [results[ds]["latency_ms"][k] for k in keys]
         bars = ax.bar(x + (i - 0.5) * w, vals, w, label=ds)
         ax.bar_label(bars, fmt="%.3f", fontsize=7, padding=1)
@@ -161,7 +205,7 @@ def figures(results):
     fig.tight_layout(); fig.savefig(os.path.join(OUT, "fig4_latency.png"), dpi=200)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
-    for ax, (ds, _) in zip(axes, DATASETS):
+    for ax, (ds, *_) in zip(axes, DATASETS):
         h       = results[ds]["hybrid"]
         allow2  = h["decisions"]["ALLOW"] - h["stage1_cleared"]
         parts   = [("ALLOW at Stage 1", h["stage1_cleared"]),
@@ -179,38 +223,40 @@ def figures(results):
     plt.close("all")
 
 
-def seed_sweep(builder, seeds):
+def seed_sweep(builder, cost, seeds):
     """Mean ± std of each model's metrics over several dataset seeds."""
     runs = []
     for seed in seeds:
         sessions, labels = builder(n_sessions=N, seed=seed)
         detector = HybridDetector()
-        detector.fit(sessions[:TRAIN_SPLIT], labels[:TRAIN_SPLIT])
+        detector.fit(sessions[:TRAIN_SPLIT], labels[:TRAIN_SPLIT], page_cost=cost)
         runs.append(run_comparison(detector, detector.pta,
                                    sessions[:TRAIN_SPLIT], labels[:TRAIN_SPLIT],
                                    sessions[TRAIN_SPLIT:], labels[TRAIN_SPLIT:]))
     out = {}
     for i, model in enumerate(runs[0]):
         out[model["Model"]] = {
-            metric: {"mean": round(float(np.mean([r[i][metric] for r in runs])), 1),
-                     "std":  round(float(np.std([r[i][metric] for r in runs])), 1)}
-            for metric in ("Accuracy", "F1", "FPR %", "FNR %")}
+            metric: {"mean": round(float(np.mean([r[i][metric] for r in runs])), digits),
+                     "std":  round(float(np.std([r[i][metric] for r in runs])), digits)}
+            for metric, digits in (("Accuracy", 1), ("F1", 1), ("FPR %", 2), ("FNR %", 1))}
     return out
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
     results = {}
-    for name, builder in DATASETS:
+    for name, builder, cost in DATASETS:
         print(f"Measuring {name}...")
-        results[name] = measure(name, builder)
+        results[name] = measure(name, builder, cost)
     figures(results)
 
     seeds = [42, 1, 2, 3, 4]
-    for name, builder in DATASETS:
+    for name, builder, cost in DATASETS:
         print(f"Seed sweep {name} ({len(seeds)} seeds)...")
         results[name]["seed_sweep"] = {"seeds": seeds,
-                                       "models": seed_sweep(builder, seeds)}
+                                       "models": seed_sweep(builder, cost, seeds)}
+        print(f"Leave-one-family-out {name}...")
+        results[name]["leave_one_family_out"] = leave_one_family_out(builder, cost)
 
     summary = {ds: {k: v for k, v in r.items() if not k.startswith("_")}
                for ds, r in results.items()}

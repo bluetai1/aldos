@@ -1,11 +1,12 @@
 from pta.pta_model     import PTAModel
-from pta.scoring       import session_pta_score
+from pta.scoring       import session_pta_score, known_transition_count
 from pta.train_model   import MLModel
 from pta.simulate_data import create_dataset
 
 PTA_SUSPICION_THRESHOLD = 0.60
 ML_LOW_RISK_THRESHOLD   = 0.35
 ML_HIGH_RISK_THRESHOLD  = 0.70
+MIN_SESSION_LENGTH      = 3     # shorter sessions carry too little evidence
 
 class HybridDetector:
     def __init__(self):
@@ -36,17 +37,20 @@ class HybridDetector:
         print(f"[TRAIN] PTA + Decision Tree fitted on {len(sessions)} sessions "
               f"({labels.count(0)} legitimate, {labels.count(1)} attack).")
 
-    def fit(self, sessions, labels, pta_features=True):
+    def fit(self, sessions, labels, pta_features=True, page_cost=None):
         """Fit to a labelled dataset: learn the PTA from its legitimate
         sessions, train the Decision Tree (optionally with PTA features
         added), and set the Stage 1 threshold so only sessions scoring below
-        every training attack are cleared."""
-        self.pta.learn(sessions, labels)
+        every training attack are cleared. page_cost gives each page's
+        relative server cost (the PTA's workload W and the cost_rate feature)."""
+        self.pta.learn(sessions, labels, page_cost)
         # Stage 2 also sees the PTA's view of the session
-        self.ml.pta = self.pta if pta_features else None
+        self.ml.pta       = self.pta if pta_features else None
+        self.ml.page_cost = page_cost
         self.ml.train(sessions, labels)
         attack_scores = [self._stage1_pta_score(s)
-                         for s, y in zip(sessions, labels) if y == 1]
+                         for s, y in zip(sessions, labels)
+                         if y == 1 and len(s) >= MIN_SESSION_LENGTH]
         if attack_scores:
             self.pta_threshold = min(attack_scores)
 
@@ -65,9 +69,20 @@ class HybridDetector:
         else:
             return {"decision": "BLOCK",     "risk": "HIGH"}
 
-    def evaluate_session(self, session):
+    def evaluate_session(self, session, under_load=False):
+        """under_load: the site-wide LoadGuard (pta/traffic.py) reports
+        unusual load. Sessions too short to judge are allowed normally but
+        challenged under load, since a botnet can split its attack into
+        one- or two-request sessions."""
+        if len(session) < MIN_SESSION_LENGTH:
+            decision = "CHALLENGE" if under_load else "ALLOW"
+            return {"pta_score": None, "stage": "SHORT", "decision": decision,
+                    "risk": "MEDIUM" if under_load else "LOW", "attack_prob": None}
         pta_score = self._stage1_pta_score(session)
-        if pta_score < self.pta_threshold:
+        # Only fast-path sessions the PTA could actually score: a session of
+        # unknown pages has no scored transitions, not a clean record
+        scored = known_transition_count(self.pta, session) >= MIN_SESSION_LENGTH - 1
+        if scored and pta_score < self.pta_threshold:
             return {"pta_score": round(pta_score,4), "stage": "PTA",
                     "decision": "ALLOW", "risk": "LOW", "attack_prob": None}
         attack_prob = self._stage2_ml_risk(session)
