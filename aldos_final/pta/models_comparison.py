@@ -17,23 +17,12 @@ from sklearn.metrics import (accuracy_score, precision_score,
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 from pta.scoring import session_pta_score, min_transition_prob
+from pta.train_model import behaviour_features
 
 
-# ── Helper: extract the same 5 features used by our ML stage ─────────────────
+# ── Helper: the same behavioural features used by our ML stage ───────────────
 def extract_features(session):
-    if not session:
-        return [0.0, 0.0, 0.0, 0.0, 0]
-    times = [t for _, t in session]
-    pages = [p for p, _ in session]
-    dur   = sum(times)
-    rate  = len(session) / (dur + 1e-6)
-    var   = float(np.var(times)) if len(times) > 1 else 0.0
-    counts = {}
-    for pg in pages:
-        counts[pg] = counts.get(pg, 0) + 1
-    rep    = max(counts.values()) / len(pages)
-    rapid  = sum(1 for t in times if t < 0.5)
-    return [rate, var, rep, dur, rapid]
+    return behaviour_features(session)
 
 
 # ── Helper: pick the cut-off on a 1-D score that maximises training accuracy ──
@@ -101,7 +90,7 @@ class DeepLearningModel:
     """
     Multi-Layer Perceptron — represents modern deep learning approaches.
     3 hidden layers: 64 → 32 → 16 neurons, ReLU activation.
-    Same 5 features as our Decision Tree for a fair comparison.
+    Same behavioural features as our Decision Tree for a fair comparison.
     """
     name = "Deep Learning / MLP (Neural Net)"
 

@@ -15,9 +15,12 @@ def generate_attack_session():
 
 def generate_single_url_flood_session():
     """One page hammered repeatedly — the paper's A2/A4 attack."""
-    page = random.choice(["search", "dashboard", "login", "profile"])
-    return [(page, round(random.uniform(0.05, 0.3), 2))
-            for _ in range(random.randint(4, 8))]
+    page  = random.choice(["search", "dashboard", "login", "profile"])
+    flood = [(page, round(random.uniform(0.05, 0.3), 2))
+             for _ in range(random.randint(4, 8))]
+    if random.random() < 0.5:   # decoy: open like a normal user
+        flood = [("login", round(random.uniform(1.5, 3.5), 2))] + flood
+    return flood
 
 def generate_borderline_session():
     """Slow bot — mimics human timing but repeats pages."""

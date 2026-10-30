@@ -84,11 +84,15 @@ look more normal than every attack seen in training.
 | `page_repetition`     | Share of requests hitting the most-requested page   |
 | `session_duration`    | Total time of the session                           |
 | `rapid_requests`      | Requests with < 0.5 s think time                    |
-| `pta_score`\*         | Stage 1 score (page-order + timing evidence)        |
-| `min_transition_prob`\* | How unlikely the session's rarest step is         |
+| `longest_rapid_streak` | Longest run of consecutive < 0.5 s requests        |
+| `longest_same_page_streak` | Longest run of consecutive requests to one page |
+| `pta_score`           | Stage 1 score (page-order + timing evidence)        |
+| `min_transition_prob` | How unlikely the session's rarest step is           |
 
-\* PTA features: used when fitting to the benchmark datasets. They are not used in the small
-simulated demo (see [Limitations](#limitations)).
+The two **streak** features were added after we found an evasion by testing our own model: an
+attacker who opens with a few normal-looking pages dilutes whole-session statistics like
+`page_repetition`. A decoy prefix can't shorten a streak, though. See
+[Red-teaming](#red-teaming).
 
 We chose a Decision Tree over a neural network so that **every decision can be traced to
 readable if/then rules**, which can be audited, explained to a blocked user, or shown to a
@@ -113,37 +117,66 @@ reproduced by `python report.py`.
 
 | Model                        | SDSC Accuracy | SDSC F1   | SDSC FPR | SDSC FNR | ClarkNet Accuracy | ClarkNet F1 | ClarkNet FPR | ClarkNet FNR |
 |------------------------------|---------------|-----------|----------|----------|-------------------|-------------|--------------|--------------|
-| **Hybrid PTA + DT (ours)**   | **99.7 ± 0.1** | **99.2 ± 0.3** | 0.1 ± 0.0 | **1.4 ± 0.5** | **98.4 ± 0.6** | **96.1 ± 1.1** | 1.5 ± 0.7 | **2.1 ± 1.1** |
-| PTA Only (Praseed 2021)      | 92.6 ± 0.5    | 82.1 ± 1.3 | 5.3 ± 0.4 | 15.9 ± 2.6 | 83.0 ± 0.5     | 38.1 ± 1.6  | 2.6 ± 0.5    | 74.0 ± 1.7   |
-| Random Walk (Xu et al. 2014) | 96.8 ± 0.2    | 91.4 ± 0.6 | **0.0 ± 0.0** | 15.8 ± 1.0 | 90.9 ± 0.5 | 71.1 ± 1.5  | **0.0 ± 0.0** | 44.9 ± 1.7  |
-| Deep Learning (MLP 64-32-16) | 95.4 ± 0.3    | 88.1 ± 0.9 | 1.6 ± 0.5 | 16.2 ± 2.6 | 97.6 ± 0.4     | 93.9 ± 1.0  | 0.5 ± 0.2    | 9.8 ± 2.0    |
-| Rate Threshold (1.8 req/s)   | 87.4 ± 0.3    | 57.0 ± 2.0 | 0.9 ± 0.3 | 58.6 ± 2.1 | 86.8 ± 0.6     | 56.2 ± 1.7  | 1.9 ± 0.4    | 58.0 ± 2.2   |
+| **Hybrid PTA + DT (ours)**   | **99.8 ± 0.1** | **99.5 ± 0.2** | **0.0 ± 0.0** | **0.9 ± 0.5** | **99.7 ± 0.1** | **99.1 ± 0.3** | 0.2 ± 0.1 | **1.1 ± 0.5** |
+| PTA Only (Praseed 2021)      | 92.1 ± 0.3    | 80.6 ± 1.3 | 5.8 ± 0.5 | 16.7 ± 3.5 | 82.3 ± 0.9     | 34.3 ± 1.9  | 2.5 ± 0.4    | 77.2 ± 1.6   |
+| Random Walk (Xu et al. 2014) | 97.4 ± 0.2    | 92.8 ± 0.6 | **0.0 ± 0.0** | 13.4 ± 1.1 | 92.2 ± 1.0 | 76.2 ± 2.9  | **0.0 ± 0.0** | 38.3 ± 3.8  |
+| Deep Learning (MLP 64-32-16) | 96.0 ± 0.1    | 89.4 ± 0.5 | 1.2 ± 0.1 | 15.2 ± 0.9 | 97.2 ± 0.4     | 92.9 ± 1.0  | 0.7 ± 0.2    | 10.9 ± 1.9   |
+| Rate Threshold (1.8 req/s)   | 86.4 ± 0.1    | 50.8 ± 0.9 | 1.1 ± 0.1 | 64.4 ± 1.0 | 85.5 ± 0.5     | 49.8 ± 2.2  | 1.6 ± 0.3    | 64.7 ± 2.2   |
 
 All values are percentages.
 
 **Takeaways:**
 
-- **The hybrid has the best accuracy, F1 and miss rate on both datasets.**
+- **The hybrid has the best accuracy, F1 and miss rate on both datasets.** It misses about 1% of
+  attacks; every other model misses 10–77%.
 - **Each signal alone misses an attack type, and the hybrid uses both.**
-  - Rate Threshold looks only at timing, so it misses about 58% of attacks: the bots that pace
-    themselves like humans.
+  - Rate Threshold looks only at timing, so it misses about 64% of attacks: human-paced bots and
+    floods hidden behind a decoy.
   - Random Walk looks only at page order, so it never raises a false alarm but misses bots whose
     navigation looks normal.
-- **The trade-off is false alarms on ClarkNet.** The hybrid's FPR there is 1.5%, against 0.5% for
-  the MLP.
+- **Only Random Walk has fewer false alarms.** On ClarkNet the hybrid's FPR is 0.2%, against
+  0.0% for Random Walk, and Random Walk misses 38% of attacks.
 - **The trained tree is readable** ([`results/tree_rules_*.txt`](results/)). Its first rule,
-  "the session contains a transition real users almost never make", catches 1,363 of 1,597
+  "the session contains a transition real users almost never make", catches 1,379 of 1,600
   training attacks on SDSC.
-- **Stage 1 is safe but clears little.** The learned θ cleared 12.8% (SDSC) and 3.4% (ClarkNet)
+- **Stage 1 is safe but clears little.** The learned θ cleared 6.3% (SDSC) and 5.6% (ClarkNet)
   of test sessions, with no attacks among them.
 - **Per-session cost, timed one session at a time:**
 
   | Path                             | ms per session |
   |----------------------------------|----------------|
   | Stage 1 fast path                | ~0.01          |
-  | Full hybrid                      | 0.12–0.15      |
-  | MLP, one session at a time       | 0.22–0.24      |
-  | MLP, batched (not possible live) | 0.015          |
+  | Full hybrid                      | ~0.12          |
+  | MLP, one session at a time       | ~0.22          |
+  | MLP, batched (not possible live) | 0.02–0.04      |
+
+---
+
+## Red-teaming
+
+After the results above were first produced, we tried to evade our own detector. One normal
+page followed by six `product` requests 0.1 s apart was **allowed with 0% attack probability**:
+
+- Every flood in the training data hit a single page from start to finish, so the tree had
+  learned "almost all requests on one page" as the flood signal.
+- One decoy page dropped that share below the tree's cut-off.
+
+**The fix:**
+
+- 30% of benchmark attacks now open with 1–3 normal-looking pages.
+- We added the two streak features, which a decoy prefix can't dilute.
+- The MLP baseline gets the same features, so the comparison stays fair.
+
+After retraining, the detector blocks all of the following:
+
+- decoy + flood (with 1 or 3 decoy pages)
+- flood + decoy suffix
+- floods that alternate between two pages
+- 0.6 s-paced floods, just above the "rapid" cut-off
+- human-paced single-page bots
+
+It still allows a 3-request session with two fast clicks: too short to call, and it looks just
+like a user double-clicking.
 
 ---
 
@@ -154,10 +187,11 @@ All values are percentages.
 | PTA used on SDSC/ClarkNet | Hand-written `login/dashboard/...` graph; the benchmark sites' pages were unknown to it | Learned per dataset from legitimate training sessions |
 | Stage 1 threshold θ | Fixed at 0.60 | Learned from the training data (the paper's future work, §VI) |
 | Baseline thresholds | Fixed (0.55, 0.35) | Tuned on the training split, same PTA as ours |
-| Attack timing | Every attack 0.05–0.20 s apart | 40% flood, 30% slow bot, 30% human-paced |
+| Attack timing | Every attack 0.05–0.20 s apart | 40% flood, 30% slow bot, 30% human-paced; 30% open with a decoy |
 | Legitimate navigation | Random pages | Realistic flows (e.g. search → product → cart → checkout), plus 20% fast "power users" |
-| Stage 2 features | 5 behavioural | 5 behavioural + 2 PTA features (benchmark) |
-| Headline result | 100% accuracy, 0% FPR | 99.7% / 98.4% accuracy, 0.1% / 1.5% FPR (5-seed mean) |
+| Stage 2 features | 5 behavioural | 7 behavioural (incl. 2 streak features) + 2 PTA features |
+| Demo detector | Trained on a small toy set | The same detector as the SDSC benchmark |
+| Headline result | 100% accuracy, 0% FPR | 99.8% / 99.7% accuracy, 0.0% / 0.2% FPR (5-seed mean) |
 | Figures, Stage 1 coverage, latency | Not generated by the code | Measured by `report.py` |
 
 **Why we changed it:**
@@ -201,8 +235,8 @@ The original SDSC-HTTP and ClarkNet-HTTP logs aren't readily available, so
 | A4   | Single-URL asymmetric (`checkout`)                 |
 | A5   | Botnet (repeated scripted sequence)                |
 
-Each attack session gets one pacing: flood, slow bot, or human-paced but regular. The demo in
-`main.py` uses a separate, smaller simulated set from [`pta/simulate_data.py`](pta/simulate_data.py).
+Each attack session gets one pacing: flood, slow bot, or human-paced but regular. 30% of attack
+sessions open with 1–3 normal-looking pages (a decoy).
 
 ---
 
@@ -224,7 +258,7 @@ aldos_final/
     ├── scoring.py           # P_think, per-transition suspicion, session score, min transition prob
     ├── train_model.py       # MLModel: feature extraction + DecisionTreeClassifier
     ├── datasets.py          # SDSC / ClarkNet style dataset generators (benchmark)
-    ├── simulate_data.py     # Small simulated set for the demo
+    ├── simulate_data.py     # Small toy set used by detector.train() (not the demo)
     └── models_comparison.py # Baselines, threshold tuning, metrics, comparison table
 ```
 
@@ -244,9 +278,11 @@ python report.py        # regenerate results/ (a few minutes, including the 5-se
 
 `main.py` takes about 10 seconds and prints:
 
-1. **Eight sample sessions**, each with its PTA score, the stage that decided, the decision, and
-   the attack probability.
-2. **A batch of 10 random sessions** with decision counts.
+1. **Eight sample sessions** scored by the SDSC-trained detector. Each shows its PTA score, the
+   stage that decided, the decision, and the attack probability. The sessions include a fast
+   legitimate user, a slow bot and a disguised flood.
+2. **Ten held-out test sessions**, with their true labels: 6 random, plus examples of the
+   Stage 1 fast path and of `CHALLENGE`.
 3. **A five-model comparison** on each dataset.
 4. **A summary table.**
 
@@ -262,8 +298,9 @@ detector.evaluate_session([("login", 0.08), ("login", 0.09), ("search", 0.07)])
 # {'pta_score': ..., 'stage': 'ML', 'decision': 'BLOCK', 'risk': 'HIGH', 'attack_prob': ...}
 ```
 
-`detector.train(n_samples)` fits on the built-in simulated set instead.
 `print(detector.explain())` prints the trained tree as if/then rules.
+`detector.train(n_samples)` fits on a small toy set from `simulate_data.py`. It's quick, but
+too small to give a stable tree, so the demos use the SDSC-trained detector instead.
 
 ---
 
@@ -273,17 +310,16 @@ detector.evaluate_session([("login", 0.08), ("login", 0.09), ("search", 0.07)])
   `datasets.py`. Validating on real logs (SDSC, ClarkNet, CAIDA) is the most important next step.
 - **Sessions are evaluated in isolation.** A distributed attacker can keep every session
   harmless-looking. Tracking behaviour per IP across sessions would close this gap.
-- **`CHALLENGE` never fired on the benchmark test sets** (0 of 2,000 on each). Most tree leaves
-  contain only one class, so probabilities are 0% or 100%. Requiring 10–25 samples per leaf gave
-  only 4–11 challenges per 2,000 sessions: these datasets contain few genuinely ambiguous
-  sessions. Real traffic and calibrated probabilities are needed to evaluate the graded response
-  properly.
-- **The demo doesn't use the PTA features.** The demo's simulated set is small (432 sessions), and
-  with PTA features the tree overfits generator quirks and lets an obvious flood through, so
-  `train()` fits without them.
+- **`CHALLENGE` is rare:** 1 (SDSC) and 4 (ClarkNet) of 2,000 test sessions. Most tree leaves
+  contain only one class, so probabilities are almost always 0% or 100%. These datasets contain
+  few genuinely ambiguous sessions. Real traffic and calibrated probabilities are needed to
+  evaluate the graded response properly.
+- **Red-teaming covered only the evasions we thought of.** A supervised model catches the attacks
+  it was trained on; a new evasion strategy may need new training data or features.
 - **The learned θ can admit disguised bots.** An attack that scores lower than every training
-  attack is allowed at Stage 1. On the benchmark test sets this never happened. In the demo, it
-  happened to 1 of 4,000 simulated bots.
+  attack is allowed at Stage 1. On the benchmark test sets this never happened.
+- **Single-request sessions score 0 and are always cleared,** because there's no transition to
+  score.
 - **The timings are rough.** They come from single-threaded Python on one laptop and vary by
   about 10% between runs.
 

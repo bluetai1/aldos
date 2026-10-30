@@ -17,6 +17,7 @@ To keep the benchmark from being trivially separable:
  - Legitimate users follow a navigation flow (Markov chain), not random pages
  - ~20% of legitimate users are fast "power users" (~1s think times)
  - Only ~40% of attacks flood; the rest pace requests to look human
+ - ~30% of attacks open with a few normal-looking requests (decoy prefix)
 """
 
 import random
@@ -99,6 +100,16 @@ def _walk(flow, start_pages, start_weights, max_len):
     return pages
 
 
+def _with_decoy(attack, flow, start_pages, start_weights):
+    """30% of attackers open with 1-3 normal-looking requests before the attack,
+    so whole-session statistics like page_repetition get diluted."""
+    if random.random() >= 0.30:
+        return attack
+    think = _legit_timer()
+    decoy = _walk(flow, start_pages, start_weights, random.randint(1, 3))
+    return [(p, think()) for p in decoy] + attack
+
+
 def generate_sdsc_normal_session():
     pages = _walk(SDSC_FLOW, SDSC_PAGES, SDSC_WEIGHTS, random.randint(3, 8))
     think = _legit_timer()
@@ -110,7 +121,8 @@ def generate_sdsc_attack_session(attack_type="flood"):
     Five attack types from the paper:
     A1 random flood, A2 single-URL flood,
     A3 random asymmetric, A4 single-URL asymmetric, A5 botnet
-    Each session's pacing is drawn from _attack_timer (flood or human-like).
+    Each session's pacing is drawn from _attack_timer (flood or human-like),
+    and 30% get a decoy prefix of normal browsing (_with_decoy).
     """
     think = _attack_timer()
     if attack_type == "A1":   # random flood
@@ -125,7 +137,8 @@ def generate_sdsc_attack_session(attack_type="flood"):
     else:                     # A5 botnet — scripted sequence
         script = random.choices(SDSC_PAGES, k=4)
         pages  = script * random.randint(2, 4)
-    return [(p, think()) for p in pages]
+    return _with_decoy([(p, think()) for p in pages],
+                       SDSC_FLOW, SDSC_PAGES, SDSC_WEIGHTS)
 
 
 def generate_clark_normal_session():
@@ -145,7 +158,8 @@ def generate_clark_attack_session():
         pages = random.choices(pages_pool, k=3) * 3
     else:
         pages = random.choices(pages_pool, k=random.randint(4, 9))
-    return [(p, think()) for p in pages]
+    return _with_decoy([(p, think()) for p in pages],
+                       CLARK_FLOW, CLARK_PAGES, CLARK_WEIGHTS)
 
 
 def build_sdsc_dataset(n_sessions=500, seed=42):

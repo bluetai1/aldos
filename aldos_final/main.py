@@ -1,9 +1,4 @@
 from hybrid_detector import HybridDetector
-from pta.simulate_data import (generate_normal_session,
-                                generate_attack_session,
-                                generate_borderline_session,
-                                generate_noisy_normal_session,
-                                generate_noisy_attack_session)
 from pta.datasets import build_sdsc_dataset, build_clarknet_dataset
 from pta.models_comparison import run_comparison, print_comparison_table
 import random
@@ -30,49 +25,68 @@ def main():
     print("  PTA + Decision Tree — Two-Stage Pipeline")
     print("=" * 60)
 
-    detector = HybridDetector()
-    detector.train(n_samples=200)
+    N = 10000
+    TRAIN_SPLIT = 8000
+
+    sdsc_sessions, sdsc_labels = build_sdsc_dataset(n_sessions=N)
+    train_s = sdsc_sessions[:TRAIN_SPLIT]; train_l = sdsc_labels[:TRAIN_SPLIT]
+    test_s  = sdsc_sessions[TRAIN_SPLIT:]; test_l  = sdsc_labels[TRAIN_SPLIT:]
+
+    detector_sdsc = HybridDetector()
+    detector_sdsc.fit(train_s, train_l)
+    print(f"\n[TRAIN] Fitted on {TRAIN_SPLIT:,} SDSC-HTTP sessions "
+          f"({train_l.count(0):,} legitimate, {train_l.count(1):,} attack). "
+          f"Learned θ = {detector_sdsc.pta_threshold:.3f}")
 
     # ── Individual session tests ───────────────────────────────
     test_cases = [
-        ("Normal user",            generate_normal_session()),
-        ("DDoS attacker",          generate_attack_session()),
-        ("Borderline / slow bot",  generate_borderline_session()),
-        ("Fast legitimate user",   [("login",0.6),("dashboard",0.8),("logout",0.5)]),
-        ("Medium-risk bot",        [("search",0.3),("search",0.4),("dashboard",0.3),
-                                    ("search",0.2),("logout",0.8)]),
-        ("Noisy normal",           generate_noisy_normal_session()),
-        ("Noisy attack",           generate_noisy_attack_session()),
-        ("Hand-crafted attack",    [("login",0.08),("login",0.09),
-                                    ("search",0.07),("search",0.08)]),
+        ("Normal shopper",       [("index",2.1),("search",3.4),("product",5.2),
+                                  ("cart",2.8),("checkout",4.0),("logout",1.5)]),
+        ("Checkout flood",       [("checkout",0.1)] * 6),
+        ("Slow checkout bot",    [("checkout",1.8),("checkout",1.7),("checkout",1.9),
+                                  ("checkout",1.8),("checkout",1.7)]),
+        ("Fast legitimate user", [("index",0.7),("search",1.1),("product",0.9),
+                                  ("cart",0.8),("checkout",1.2)]),
+        ("Medium-risk bot",      [("search",0.3),("search",0.4),("product",0.3),
+                                  ("search",0.2),("logout",0.8)]),
+        ("Product browser",      [("index",2.0),("product",3.0),("product",2.5),
+                                  ("product",4.1),("search",2.2)]),
+        ("Disguised flood",      [("index",2.0),("search",2.5),("product",3.0)]
+                                 + [("product",0.1)] * 6),
+        ("Hand-crafted attack",  [("login",0.08),("login",0.09),
+                                  ("search",0.07),("search",0.08)]),
     ]
 
     print(f"\nEvaluating {len(test_cases)} sessions...\n")
     for label, session in test_cases:
-        result = detector.evaluate_session(session)
+        result = detector_sdsc.evaluate_session(session)
         print_result(label, session, result)
 
-    # ── Batch ─────────────────────────────────────────────────
+    # ── Batch: held-out test sessions ──────────────────────────
+    # 6 at random, plus examples of the Stage 1 fast path and of CHALLENGE
+    outputs   = detector_sdsc.evaluate_batch(test_s)
+    rng       = random.Random(7)
+    cleared   = [i for i, o in enumerate(outputs) if o["stage"] == "PTA"][:2]
+    challenge = [i for i, o in enumerate(outputs) if o["decision"] == "CHALLENGE"][:2]
+    others    = [i for i in range(len(test_s)) if i not in cleared + challenge]
+    picked    = cleared + challenge + rng.sample(others, 10 - len(cleared) - len(challenge))
+    rng.shuffle(picked)
+
     print(f"\n\n{'='*60}")
-    print("  Batch evaluation (10 random sessions)")
+    print("  Batch: 10 held-out test sessions")
+    print("  (6 random + Stage 1 and CHALLENGE examples)")
     print("=" * 60)
-    mixed = ([generate_normal_session()       for _ in range(3)] +
-             [generate_noisy_normal_session() for _ in range(2)] +
-             [generate_attack_session()       for _ in range(2)] +
-             [generate_noisy_attack_session() for _ in range(2)] +
-             [generate_borderline_session()   for _ in range(1)])
-    random.shuffle(mixed)
-    results   = detector.evaluate_batch(mixed)
-    decisions = [r["decision"] for r in results]
-    print(f"\n  {'#':<6} {'PTA Score':<12} {'Stage':<6} {'Decision':<12} {'Attack Prob'}")
+    print(f"\n  {'#':<4} {'Truth':<8} {'PTA Score':<11} {'Stage':<6} {'Decision':<11} {'Attack Prob'}")
     print(f"  {'─'*55}")
-    for i, (sess, res) in enumerate(zip(mixed, results)):
+    for n, i in enumerate(picked, 1):
+        res    = outputs[i]
+        truth  = "attack" if test_l[i] else "legit"
         ap     = res['attack_prob']
         ap_str = f"{ap*100:.1f}%" if ap is not None else "N/A"
-        print(f"  {i+1:<6} {res['pta_score']:<12} {res['stage']:<6} {res['decision']:<12} {ap_str}")
-    print(f"\n  ALLOW    : {decisions.count('ALLOW')}")
-    print(f"  CHALLENGE: {decisions.count('CHALLENGE')}")
-    print(f"  BLOCK    : {decisions.count('BLOCK')}")
+        print(f"  {n:<4} {truth:<8} {res['pta_score']:<11} {res['stage']:<6} {res['decision']:<11} {ap_str}")
+    decisions = [o["decision"] for o in outputs]
+    print(f"\n  All {len(test_s):,} test sessions → ALLOW {decisions.count('ALLOW')}, "
+          f"CHALLENGE {decisions.count('CHALLENGE')}, BLOCK {decisions.count('BLOCK')}")
 
     # ── Model Comparison: SDSC-HTTP (10,000 sessions) ─────────
     print(f"\n\n{'='*60}")
@@ -80,17 +94,6 @@ def main():
     print("  10,000 sessions | 8,000 train | 2,000 test")
     print(f"  (Reconstructed from Praseed & Thilagam 2021)")
     print("=" * 60)
-
-    N = 10000
-    TRAIN_SPLIT = 8000
-
-    print("\n  Building SDSC-HTTP dataset...")
-    sdsc_sessions, sdsc_labels = build_sdsc_dataset(n_sessions=N)
-    train_s = sdsc_sessions[:TRAIN_SPLIT]; train_l = sdsc_labels[:TRAIN_SPLIT]
-    test_s  = sdsc_sessions[TRAIN_SPLIT:]; test_l  = sdsc_labels[TRAIN_SPLIT:]
-
-    detector_sdsc = HybridDetector()
-    detector_sdsc.fit(train_s, train_l)
 
     print("  Running all models...\n")
     sdsc_results = run_comparison(detector_sdsc, detector_sdsc.pta,
