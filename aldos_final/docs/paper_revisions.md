@@ -212,21 +212,24 @@ the code does.
 **Replace the paragraph and Table 1 with** (from `python main.py`):
 
 > Table 1 shows how the system handles eight example sessions. The demo detector is trained on a
-> small simulated set (382 sessions), and its learned θ clears both legitimate examples at
-> Stage 1 without calling the classifier. One of them is a fast user clicking every 0.5–0.8 s.
-> A fixed-threshold system would flag this user, since the score of 0.847 is above 0.60. All five
-> attack sessions go to Stage 2 and are blocked. The "Noisy normal" user goes to Stage 2, which
-> correctly allows them (0% attack probability).
+> small simulated set of 432 sessions, which includes single-URL floods.
+>
+> - **Two legitimate users are cleared at Stage 1** by the learned θ, without calling the
+>   classifier.
+> - **The most important row is the fast legitimate user,** who clicks every 0.5–0.8 s. Their
+>   PTA score is 0.847, so a fixed-threshold system (θ = 0.60) would block them. Our system
+>   sends them to Stage 2, which gives a 0% attack probability and allows them through.
+> - **All five attack sessions are blocked.**
 
 | Session            | PTA score | Stage | Decision | Attack prob. |
 |--------------------|----------:|-------|----------|-------------:|
-| Normal user        | 0.666     | PTA   | ALLOW    | —            |
-| DDoS attacker      | 0.963     | ML    | BLOCK    | 100%         |
-| Slow bot           | 0.922     | ML    | BLOCK    | 100%         |
-| Fast legit user    | 0.847     | PTA   | ALLOW    | —            |
+| Normal user        | 0.653     | PTA   | ALLOW    | —            |
+| DDoS attacker      | 0.962     | ML    | BLOCK    | 100%         |
+| Slow bot           | 0.943     | ML    | BLOCK    | 100%         |
+| Fast legit user    | 0.847     | ML    | ALLOW    | 0%           |
 | Medium-risk bot    | 0.959     | ML    | BLOCK    | 100%         |
-| Noisy normal user  | 0.884     | ML    | ALLOW    | 0%           |
-| Noisy attack bot   | 0.914     | ML    | BLOCK    | 100%         |
+| Noisy normal user  | 0.676     | PTA   | ALLOW    | —            |
+| Noisy attack bot   | 0.934     | ML    | BLOCK    | 96.4%        |
 | Hand-crafted attack| 0.990     | ML    | BLOCK    | 100%         |
 
 ---

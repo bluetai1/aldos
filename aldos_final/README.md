@@ -12,7 +12,7 @@ server down with a small number of valid-looking requests to its most expensive 
 **Authors:** Tamirah Goode, Keila Chavez, Taiwo Ojo. CSIT 540 (Computer Networks Security),
 Montclair State University.
 **Paper:** *A Hybrid PTA and Decision Tree Framework for Application Layer DDoS Detection with
-Graded Response* ([`docs/Final_Research_Paper.pdf`](docs/Final_Research_Paper.pdf)).
+Graded Response* ([`Final_Research_Paper.docx.pdf`](Final_Research_Paper.docx.pdf)).
 
 > **Note on results:** the paper reports 100% accuracy for the first version (v1) of this code.
 > After writing it, we found that the benchmark behind those numbers was flawed, fixed it, and
@@ -211,12 +211,13 @@ Each attack session gets one pacing: flood, slow bot, or human-paced but regular
 ```
 aldos_final/
 ├── main.py                  # Demo (8 sample sessions + batch) and full benchmark
+├── demo.py                  # Interactive: test your own sessions (python -i demo.py)
 ├── report.py                # Measures every paper number/figure → results/
+├── Final_Research_Paper.docx.pdf  # The paper (v1 results; see docs/paper_revisions.md)
 ├── hybrid_detector.py       # HybridDetector: fit / train / evaluate_session / explain
 ├── requirements.txt         # numpy, scikit-learn, networkx, matplotlib
 ├── results/                 # summary.json, fig1–fig5 PNGs, tree_rules_*.txt
 ├── docs/
-│   ├── Final_Research_Paper.pdf
 │   └── paper_revisions.md   # Section-by-section corrections to the paper
 └── pta/
     ├── pta_model.py         # PTAModel: networkx DiGraph; learn() builds it from sessions
@@ -237,10 +238,11 @@ Requires Python 3.8+.
 cd aldos_final
 pip install -r requirements.txt
 python main.py          # on Windows, use "py main.py" if python isn't on PATH
-python report.py        # regenerate results/ (about 5 minutes, including the 5-seed sweep)
+python -i demo.py       # interactive: check([("checkout", 0.1)] * 6)
+python report.py        # regenerate results/ (a few minutes, including the 5-seed sweep)
 ```
 
-The full run takes about a minute and prints:
+`main.py` takes about 10 seconds and prints:
 
 1. **Eight sample sessions**, each with its PTA score, the stage that decided, the decision, and
    the attack probability.
@@ -276,11 +278,12 @@ detector.evaluate_session([("login", 0.08), ("login", 0.09), ("search", 0.07)])
   only 4–11 challenges per 2,000 sessions: these datasets contain few genuinely ambiguous
   sessions. Real traffic and calibrated probabilities are needed to evaluate the graded response
   properly.
-- **The demo doesn't use the PTA features.** The demo's simulated set is small (382 sessions), and
+- **The demo doesn't use the PTA features.** The demo's simulated set is small (432 sessions), and
   with PTA features the tree overfits generator quirks and lets an obvious flood through, so
   `train()` fits without them.
-- **The learned θ can admit disguised bots.** About 1–2% of disguised bots in the demo scored
-  below every training attack and were allowed at Stage 1. On the benchmark test sets, none were.
+- **The learned θ can admit disguised bots.** An attack that scores lower than every training
+  attack is allowed at Stage 1. On the benchmark test sets this never happened. In the demo, it
+  happened to 1 of 4,000 simulated bots.
 - **The timings are rough.** They come from single-threaded Python on one laptop and vary by
   about 10% between runs.
 

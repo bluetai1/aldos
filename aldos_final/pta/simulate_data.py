@@ -13,6 +13,12 @@ def generate_attack_session():
     pages = ["login", "login", "login", "dashboard", "search"]
     return [(page, round(random.uniform(0.05, 0.15), 2)) for page in pages]
 
+def generate_single_url_flood_session():
+    """One page hammered repeatedly — the paper's A2/A4 attack."""
+    page = random.choice(["search", "dashboard", "login", "profile"])
+    return [(page, round(random.uniform(0.05, 0.3), 2))
+            for _ in range(random.randint(4, 8))]
+
 def generate_borderline_session():
     """Slow bot — mimics human timing but repeats pages."""
     return [
@@ -80,6 +86,10 @@ def create_dataset(n=100):
     # Clear attacks
     for _ in range(n // 3):
         sessions.append(generate_attack_session()); labels.append(1)
+
+    # Single-URL floods
+    for _ in range(n // 4):
+        sessions.append(generate_single_url_flood_session()); labels.append(1)
 
     # Borderline bots
     for _ in range(n // 4):
